@@ -15,7 +15,7 @@
  * 跑法：node tests/flow-smoke.mjs
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -49,18 +49,48 @@ function section(t) {
   console.log(`\n== ${t} ==`)
 }
 
-/* ── 回执助手：被各角色终端命令调用，写出一份合法 receipt json ── */
+/* ── 回执助手：被各角色终端命令调用，写出一份合法 receipt json ──
+ * v0.9.0：role=verify 时自动给出一份 docs/ 下每个文件的行级逐字摘录（内容级证据校验用）；
+ * attacksArg='bad-quote' 故意给一条对不上的摘录；attacksArg='weak' 给一条缺 failure_mode 的攻击。 */
 const HELPER = join(TMP, 'write-receipt.mjs')
 const HELPER_SRC = `
-import { writeFileSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 const [file, role, verdict, evidenceCsv, attacksArg, ...findings] = process.argv.slice(2)
 const evidence = evidenceCsv && evidenceCsv !== '-' ? evidenceCsv.split(',') : []
-const n = attacksArg === '-' ? (role === 'adversarial' ? 2 : 0) : Number(attacksArg)
-const attacks = Array.from({ length: Number.isFinite(n) && n > 0 ? n : 0 }, (_, i) => ({
-  target: 'target-' + (i + 1),
-  failure_mode: 'failure-mode-' + (i + 1),
-}))
-writeFileSync(file, JSON.stringify({ role, verdict, findings, evidence, attacks }, null, 2))
+const badQuote = attacksArg === 'bad-quote'
+const weak = attacksArg === 'weak'
+const n = attacksArg === '-' || badQuote || weak ? (role === 'adversarial' ? 2 : 0) : Number(attacksArg)
+const attacks = weak
+  ? [{ target: 'weak-target-only' }]
+  : Array.from({ length: Number.isFinite(n) && n > 0 ? n : 0 }, (_, i) => ({
+      target: 'target-' + (i + 1),
+      failure_mode: 'failure-mode-' + (i + 1),
+    }))
+const body = { role, verdict, findings, evidence, attacks }
+if (role === 'verify') {
+  if (badQuote) {
+    body.quotes = [{ doc: '', quote: 'DEFINITELY-NOT-IN-ANY-DOC-0123456789-abcdef' }]
+  } else {
+    try {
+      const dir = join(process.cwd(), 'docs')
+      const quotes = []
+      for (const name of readdirSync(dir).sort()) {
+        if (!name.endsWith('.md')) continue
+        const p = join(dir, name)
+        const line = readFileSync(p, 'utf8')
+          .split(/\\r?\\n/)
+          .map((x) => x.trim())
+          .find((x) => x && !x.startsWith('#') && x.length >= 12)
+        if (line) quotes.push({ doc: p, quote: line })
+      }
+      if (quotes.length) body.quotes = quotes
+    } catch {
+      /* 没有 docs 目录就不给摘录（由 requireEvidenceQuote=false 的用例覆盖） */
+    }
+  }
+}
+writeFileSync(file, JSON.stringify(body, null, 2))
 `
 /** 生成一条「写回执行」终端命令（attacksArg：'2' 指定攻击点条数；'-' 走默认：对抗性复核 2 条、其它角色 0 条） */
 function receiptCmd(receiptFile, role, verdict = 'pass', evidenceCsv = '-', findings = ['ok'], attacksArg = '-') {
@@ -78,6 +108,19 @@ function receiptCmd(receiptFile, role, verdict = 'pass', evidenceCsv = '-', find
 }
 const R = (name) => join(RECEIPTS, `${name}.json`)
 const doc = (name) => join(DOCS, name)
+
+/* v0.9.0：mock 子会话给验证方回执补「逐字摘录」——从 brief 里解析依据文档，取文件中一行 ≥12 字符正文。 */
+function quoteForFile(p) {
+  try {
+    const line = readFileSync(p, 'utf8')
+      .split(/\r?\n/)
+      .map((x) => x.trim())
+      .find((x) => x && !x.startsWith('#') && x.length >= 12)
+    return line ? { doc: p, quote: line } : null
+  } catch {
+    return null
+  }
+}
 
 function stage(role, session, docName, receiptName, findings = ['ok']) {
   return {
@@ -166,9 +209,12 @@ function makeCtx() {
 
 /* ── spawn 强隔离口径的假 subagents：模拟「真实子会话」把回执写到插件指定的路径 ── */
 function makeSubagents(opts = {}) {
-  const calls = { started: [], drained: [], interrupted: [], sent: [] }
-  let n = 0
-  const writeReceipt = (receipt, role, idx) => {
+  const calls = { started: [], drained: [], interrupted: [], sent: [], active: 0, maxActive: 0 }
+  /* v0.8.0：续跑测试要跨「两个 mock 实例」保持 childId 不撞车（真实宿主不会复用已退班的 id）。 */
+  let n = Number(opts.startIdx) || 0
+  /* v0.7.0：并发观测用——可给不同 role/序号配不同回执延迟，用来制造「完成顺序 ≠ 声明顺序」 */
+  const delayOf = (role, idx) => (typeof opts.delayMs === 'function' ? Number(opts.delayMs(role, idx)) || 30 : Number(opts.delayMs) || 30)
+  const writeReceipt = (receipt, role, idx, briefText = '') => {
     const advN = Number(opts.advAttacks ?? (role === 'adversarial' ? 2 : 0))
     const attacks = Array.from({ length: Number.isFinite(advN) && advN > 0 ? advN : 0 }, (_, i) => ({
       target: `${role}-target-${i + 1}`,
@@ -176,6 +222,16 @@ function makeSubagents(opts = {}) {
     }))
     const findings = role === 'adversarial-sub' ? [`sub-ok-${idx}`] : ['spawned-ok']
     const body = { role, verdict: opts.verdict || 'pass', findings, evidence: [], attacks }
+    if (role === 'verify') {
+      const cited = (String(briefText).match(/依据文档（只读参考）：(.+)/) || [])[1] || ''
+      const quotes = cited
+        .split('；')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map(quoteForFile)
+        .filter(Boolean)
+      if (quotes.length) body.quotes = quotes
+    }
     if (role === 'adversarial' && opts.dispatchOnAdversarial) {
       body.dispatch = opts.dispatchOnAdversarial.map((d) => (typeof d === 'string' ? { focus: d } : { ...d }))
     }
@@ -198,16 +254,23 @@ function makeSubagents(opts = {}) {
       const childId = opts.duplicateId ? 'child-dup' : `child-${idx}`
       calls.started.push({ label, role, receipt, childId, parentId: request?.parent?.id || '', provider, delivery, cwd: request?.cwd, hasSignal: Boolean(signal && typeof signal.aborted === 'boolean'), hasParent: Boolean(request?.parent) })
       const skip = (opts.skipRoles || []).includes(role)
-      if (!skip && receipt) {
+      /* v0.7.0：并发观测——active/maxActive 按「已点卯、尚未交回执」计（等于同时在跑的子会话数） */
+      calls.active += 1
+      if (calls.active > calls.maxActive) calls.maxActive = calls.active
+      if (skip || !receipt) {
+        calls.active -= 1
+      } else {
         setTimeout(() => {
           try {
-            writeReceipt(receipt, role, idx)
+            writeReceipt(receipt, role, idx, text)
             /* v0.5.0 越权用例：子会话除了自己的回执，还偷偷写监视区 → 插件快照审计必须抓到。 */
             if (opts.overreach && role === 'split') writeFileSync(join(WORK, 'spawn-evil.txt'), 'x')
           } catch {
             /* 写不进去就等同空耗 */
+          } finally {
+            calls.active -= 1
           }
-        }, 30)
+        }, delayOf(role, idx))
       }
       if (opts.leakOnReadOnly && role === 'adversarial') {
         setTimeout(() => {
@@ -313,8 +376,10 @@ async function main() {
   mkdirSync(DOCS, { recursive: true })
   mkdirSync(RECEIPTS, { recursive: true })
   writeFileSync(HELPER, HELPER_SRC, 'utf8')
-  /* 依据文档：a..f + adv 各自不同内容；clone.md 与 a.md 内容完全相同（用于「同内容＝同一份」判据） */
-  for (const n of ['a', 'b', 'c', 'd', 'e', 'f', 'adv']) writeFileSync(doc(`${n}.md`), `# doc ${n}\ncontent-${n}\n`, 'utf8')
+  /* 依据文档：a..f + adv 各自不同内容；clone.md 与 a.md 内容完全相同（用于「同内容＝同一份」判据）。
+     v0.9.0：正文加一行 ≥12 字符的 VERBATIM-QUOTE-*，供验证方回执的逐字摘录（内容级证据）命中。 */
+  for (const n of ['a', 'b', 'c', 'd', 'e', 'f', 'adv'])
+    writeFileSync(doc(`${n}.md`), `# doc ${n}\nVERBATIM-QUOTE-${n}: alpha beta gamma delta epsilon zeta eta.\ncontent-${n}\n`, 'utf8')
   writeFileSync(doc('clone.md'), readFileSync(doc('a.md')))
 
   section('模块形态与注册')
@@ -383,10 +448,11 @@ async function main() {
     g ? JSON.stringify(g.adversarial && g.adversarial.changes) : '',
   )
   const rows = g ? g.verify.rows : []
-  check('验证权重：引用同文档者权重 = 1.5 < 2', rows.length === 2 && rows.every((r) => r.weight === 1.5), JSON.stringify(rows))
+  check('验证权重封顶：原始 1.5 被压到 1（每方 ≤1）', rows.length === 2 && rows.every((r) => r.weight === 1 && r.weightRaw === 1.5), JSON.stringify(rows))
   const aHash = g ? g.verify.docs.find((d) => d.citedBy.length === 2) : null
   check('同一文档被 2 方引用 → 每引用权重 1/2', !!aHash && aHash.weightEach === 0.5, JSON.stringify(aHash))
   check('加权得分 = 1（阈值 0.6）', g && g.verify.score === 1 && g.verify.independentEvidence === true, g ? String(g.verify.score) : '')
+  check('独立证据口径：2 份独引文档（b/c）才算独立', g && g.verify.independentDocs === 2 && g.verify.weightCap === 1, g ? JSON.stringify({ n: g.verify.independentDocs, cap: g.verify.weightCap }) : '')
   check('gate 记录了各角色 run 与回执', g && g.stages.every((s) => s.runId && s.actorReceipt))
 
   section('对抗性复核：只读违规')
@@ -747,6 +813,278 @@ async function main() {
   t = await run(basePlan())
   g = latestGate()
   check('declared 降级口径在 gate 标 isolation=declared', g && g.isolation && g.isolation.mode === 'declared', g ? JSON.stringify(g.isolation) : 'no gate')
+
+  /* ── v0.7.0 并行：验证方之间 / 对抗性复核下级之间按 maxParallel 有界并发 ── */
+  section('v0.7.0 并行（验证方 / 下级的有界并发）')
+  {
+    /* 默认 maxParallel=3：两个验证方回执故意写慢，应当同时在跑 */
+    const mkPar = makeSubagents({ delayMs: (role) => (role === 'verify' ? 160 : 20) })
+    ctx.provide('subagents', mkPar.sub)
+    t = await run(spawnPlan(), { sessionId: 's-main', agent: { fake: true } })
+    g = latestGate()
+    check('默认并行生效：两个验证方同时在跑', mkPar.calls.maxActive >= 2, `maxActive=${mkPar.calls.maxActive}`)
+    check(
+      'gate.parallel 记账（上限 / 两处实际并发数 / 串行阶段清单）',
+      g && g.parallel && g.parallel.maxParallel === 3 && g.parallel.verifiers === 2 && g.parallel.adversarialChildren === 0 && g.parallel.serialized.length === 7,
+      g ? JSON.stringify(g.parallel) : 'no gate',
+    )
+
+    /* maxParallel=1 → 退回旧口径：任何时刻最多 1 个子会话 */
+    const mkSer = makeSubagents({ delayMs: 25 })
+    ctx.provide('subagents', mkSer.sub)
+    t = await run(spawnPlan({ maxParallel: 1 }), { sessionId: 's-main', agent: { fake: true } })
+    g = latestGate()
+    check('maxParallel=1 → 逐个跑（maxActive 恒为 1）', mkSer.calls.maxActive === 1, `maxActive=${mkSer.calls.maxActive}`)
+    check('maxParallel=1 仍 9 个阶段全跑完', g && g.status === 'done' && g.stages.length === 9, g ? `status=${g.status} stages=${g.stages.length}` : 'no gate')
+
+    /* 完成顺序反转（验证方 1 慢、验证方 2 快）时，gate.stages 仍按创建顺序 */
+    const mkOrd = makeSubagents({ delayMs: (role, idx) => (role === 'verify' && idx === 8 ? 220 : 20) })
+    ctx.provide('subagents', mkOrd.sub)
+    t = await run(spawnPlan(), { sessionId: 's-main', agent: { fake: true } })
+    g = latestGate()
+    const order = g ? g.stages.map((s) => (s.role === 'verify' ? s.label : s.role)) : []
+    check(
+      '验证方晚完成也不改变 gate.stages 顺序（按 seq 定序）',
+      g && order.join(',') === 'split,path,adversarial,plan,isolate,modify,work,验证方 1,验证方 2',
+      order.join(','),
+    )
+    check(
+      '并发后加权分/独立性判定与串行一致',
+      g && g.verify && g.verify.score === 1 && g.verify.independentEvidence === true,
+      g && g.verify ? JSON.stringify({ score: g.verify.score, independent: g.verify.independentEvidence }) : 'no gate',
+    )
+
+    /* 对抗性复核的下级之间也并发（3 个下级同时跑） */
+    const mkChild = makeSubagents({ dispatchOnAdversarial: ['查点1', '查点2', '查点3'], delayMs: (role) => (role === 'adversarial-sub' ? 180 : 20) })
+    ctx.provide('subagents', mkChild.sub)
+    t = await run(
+      spawnPlan({ adversarial: { ...spawnPlan().adversarial, subagents: { maxChildren: 3, adjudicate: false } } }),
+      { sessionId: 's-main', agent: { fake: true } },
+    )
+    g = latestGate()
+    check('对抗性复核下级 3 路并发', mkChild.calls.maxActive >= 3, `maxActive=${mkChild.calls.maxActive}`)
+    check('gate.parallel 记下级实际并发数', g && g.parallel && g.parallel.adversarialChildren === 3, g ? JSON.stringify(g.parallel) : 'no gate')
+
+    /* 非法值开跑前拒绝（不进终端、不建子会话） */
+    t = await run(spawnPlan({ maxParallel: 9 }), { sessionId: 's-main', agent: { fake: true } })
+    check('maxParallel 越界（9）→ 开跑前拒绝', /GATE FAIL/.test(t) && /maxParallel 非法/.test(t), t.slice(0, 200))
+    t = await run(spawnPlan({ maxParallel: 0 }), { sessionId: 's-main', agent: { fake: true } })
+    check('maxParallel=0 → 开跑前拒绝', /GATE FAIL/.test(t) && /maxParallel 非法/.test(t), t.slice(0, 200))
+  }
+
+  /* ── v0.8.0：断点续跑 + 监视快照上限可配（截断必须记账）+ 独立证据 ≥2 份独引 ── */
+  section('v0.8.0 断点续跑 / 快照上限 / 独立证据收紧')
+  {
+    /* ① 快照截断：单元级（docs 下 8 份文档 > 上限 3） */
+    const flowMod = await import(pathToFileURL(join(ROOT, 'lib', 'flow.js')).href)
+    const { snapshotTree } = flowMod.__flowInternals
+    const snapTrunc = snapshotTree(DOCS, { maxFiles: 3 })
+    check('快照上限：超过 maxFiles 即截断且 truncated=true', snapTrunc.size === 3 && snapTrunc.truncated === true, `size=${snapTrunc.size} truncated=${snapTrunc.truncated}`)
+    const snapFull = snapshotTree(DOCS, { maxFiles: 100 })
+    check(
+      '快照上限：未超过时不标截断（maxFiles 记账）',
+      snapFull.size >= 8 && snapFull.truncated === false && snapFull.maxFiles === 100,
+      `size=${snapFull.size} truncated=${snapFull.truncated}`,
+    )
+
+    /* ② 非法 snapshotMaxFiles → 开跑前拒绝 */
+    t = await run(basePlan({ snapshotMaxFiles: 0 }))
+    check('snapshotMaxFiles=0 → 开跑前拒绝', /GATE FAIL/.test(t) && /snapshotMaxFiles 非法/.test(t), t.slice(0, 200))
+    t = await run(basePlan({ snapshotMaxFiles: 20001 }))
+    check('snapshotMaxFiles 超硬上限 → 拒绝', /GATE FAIL/.test(t) && /snapshotMaxFiles 非法/.test(t), t.slice(0, 200))
+
+    /* ③ 真跑：watch docs（8 文件）+ 上限 3 → gate 记 snapshot.truncated + 一条不阻断的 warning */
+    t = await run(basePlan({ watch: ['docs'], snapshotMaxFiles: 3 }))
+    g = latestGate()
+    check(
+      '快照截断记账：gate.snapshot + 一条不阻断的 warning',
+      g &&
+        g.status === 'done' &&
+        g.snapshot &&
+        g.snapshot.maxFiles === 3 &&
+        g.snapshot.truncated.length === 1 &&
+        g.warnings.some((w) => /监视快照达到上限/.test(w)),
+      g ? JSON.stringify({ snapshot: g.snapshot, warnings: g.warnings }) : 'no gate',
+    )
+
+    /* ④ 独立证据收紧：只有 1 份独引文档（c.md）→ 旧口径会 PASS，新口径必须 FAIL */
+    const oneUnique = basePlan({
+      verifiers: [
+        { name: '验证方1', session: 's-v1', receipt: R('v1'), citations: [doc('a.md'), doc('b.md')], steps: [receiptCmd(R('v1'), 'verify')] },
+        {
+          name: '验证方2',
+          session: 's-v2',
+          receipt: R('v2'),
+          citations: [doc('a.md'), doc('b.md'), doc('c.md')],
+          steps: [receiptCmd(R('v2'), 'verify')],
+        },
+      ],
+    })
+    t = await run(oneUnique)
+    g = latestGate()
+    check(
+      '独引文档仅 1 份 → 判无独立证据 FAIL（一份凑数独引不再过）',
+      /GATE FAIL/.test(t) && /无独立证据/.test(t) && g && g.verify && g.verify.independentDocs === 1,
+      g && g.verify ? JSON.stringify({ n: g.verify.independentDocs, failures: g.failures }) : 'no gate',
+    )
+
+    /* ⑤ 断点续跑：先让 work 缺回执（spawn 口径），再用健康 mock 续跑同一条流 */
+    const mkFailWork = makeSubagents({ skipRoles: ['work'] })
+    ctx.provide('subagents', mkFailWork.sub)
+    t = await run(spawnPlan({ roleTimeoutMs: 1200 }), { sessionId: 's-main', agent: { fake: true } })
+    g = latestGate()
+    const failedFlowId = g && g.flowId
+    check(
+      '续跑前置：work 缺回执 → FAIL 且留下 state.json',
+      /GATE FAIL/.test(t) && g && g.status === 'failed' && existsSync(g.stateFile),
+      g ? `status=${g.status} state=${g.stateFile}` : 'no gate',
+    )
+
+    const mkResume = makeSubagents({ startIdx: 50 })
+    ctx.provide('subagents', mkResume.sub)
+    t = await run({ resumeFlowId: failedFlowId, mainSession: 's-main' }, { sessionId: 's-main', agent: { fake: true } })
+    g = latestGate()
+    const rerunRoles = mkResume.calls.started.map((c) => c.role).sort().join(',')
+    check(
+      '续跑 → GATE PASS（沿用原 flowId）',
+      /GATE PASS/.test(t) && g && g.status === 'done' && g.flowId === failedFlowId,
+      `${t.slice(0, 140)} ｜ ${g ? g.failures.join(' / ') : 'no gate'}`,
+    )
+    check(
+      '续跑只补没办完的：work + 两验证方（已完成阶段不重跑）',
+      rerunRoles === 'verify,verify,work' && !mkResume.calls.started.some((c) => ['split', 'path', 'plan', 'isolate', 'modify'].includes(c.role)),
+      rerunRoles,
+    )
+    check(
+      'gate.resume 记账（第几次进入 / 上一轮已完成阶段 / state.json）',
+      g &&
+        g.resume &&
+        g.resume.resumed === true &&
+        g.resume.attempts === 1 &&
+        g.resume.fromPhases.includes('adversarial') &&
+        !g.resume.fromPhases.includes('work') &&
+        g.resume.stateFile === g.stateFile,
+      g ? JSON.stringify(g.resume) : 'no gate',
+    )
+    check(
+      '旧失败阶段记录标 superseded（证据保留、不与新记录混淆）',
+      g &&
+        g.stages.some((s) => s.role === 'work' && s.superseded === true) &&
+        g.stages.filter((s) => s.role === 'work' && s.status === 'done').length === 1,
+      g ? JSON.stringify(g.stages.filter((s) => s.role === 'work').map((s) => ({ status: s.status, superseded: !!s.superseded }))) : '',
+    )
+    check('续跑后已完成阶段沿用（split 仍只有一条记录）', g && g.stages.filter((s) => s.role === 'split').length === 1, g ? `split=${g.stages.filter((s) => s.role === 'split').length}` : '')
+
+    /* ⑥ 续跑护栏：不存在 / mainSession 不符 / 已 GATE PASS */
+    t = await run({ resumeFlowId: 'flow-does-not-exist', mainSession: 's-main' })
+    check('续跑不存在的断点 → 拒绝', /GATE FAIL/.test(t) && /找不到可续跑的断点/.test(t), t.slice(0, 200))
+    t = await run({ resumeFlowId: failedFlowId, mainSession: 's-other' })
+    check('续跑 mainSession 与断点不符 → 拒绝', /GATE FAIL/.test(t) && /mainSession 不匹配/.test(t), t.slice(0, 200))
+    t = await run({ resumeFlowId: failedFlowId, mainSession: 's-main' }, { sessionId: 's-main', agent: { fake: true } })
+    check('已 GATE PASS 的流再续跑 → 拒绝（无需续跑）', /GATE FAIL/.test(t) && /无需续跑/.test(t), t.slice(0, 200))
+  }
+
+  /* ── v0.9.0：大文件采样哈希 / 内容级证据 / 只读违规还原 / attacks 结构 ── */
+  section('v0.9.0 大文件哈希 / 内容级证据 / 只读还原 / attacks 结构')
+  {
+    const flowMod = await import(pathToFileURL(join(ROOT, 'lib', 'flow.js')).href)
+    const { snapshotTree, diffSnapshot } = flowMod.__flowInternals
+
+    /* ① 大文件不再 hash:null：超过 hashMaxBytes 用首尾采样哈希 */
+    const bigFile = join(WORK, 'big.bin')
+    writeFileSync(bigFile, Buffer.alloc(700 * 1024, 7))
+    const stBig = snapshotTree(WORK, { maxFiles: 2000, hashMaxBytes: 512 * 1024 })
+    const fpBig = stBig.get('big.bin')
+    check(
+      '大文件进快照：超 hash 上限用采样哈希（不再 hash:null）',
+      fpBig && fpBig.hashKind === 'sample' && typeof fpBig.hash === 'string' && fpBig.hash.length === 64,
+      fpBig ? `kind=${fpBig.hashKind} hash=${String(fpBig.hash).slice(0, 12)}` : 'no entry',
+    )
+    const stFull = snapshotTree(WORK, { maxFiles: 2000, hashMaxBytes: 4 * 1024 * 1024 })
+    const fpFull = stFull.get('big.bin')
+    check('未超上限仍用整文件哈希（hashKind=full）', fpFull && fpFull.hashKind === 'full', fpFull ? String(fpFull.hashKind) : 'no entry')
+
+    /* ② 采样哈希的盲区由 mtime 兜住：只改中间段（首尾不变）也要判「改动」 */
+    const beforeBig = snapshotTree(WORK, { maxFiles: 2000, hashMaxBytes: 512 * 1024 })
+    const buf = Buffer.alloc(700 * 1024, 7)
+    buf.write('MIDDLE-CHANGED', 300 * 1024)
+    writeFileSync(bigFile, buf)
+    const later = new Date(Date.now() + 5000)
+    utimesSync(bigFile, later, later)
+    const afterBig = snapshotTree(WORK, { maxFiles: 2000, hashMaxBytes: 512 * 1024 })
+    check(
+      '采样哈希 + mtime：中间段被改也能报「改动」',
+      diffSnapshot(beforeBig, afterBig).some((x) => x.includes('big.bin')),
+      JSON.stringify(diffSnapshot(beforeBig, afterBig)),
+    )
+
+    /* ③ 非法 snapshotHashMaxBytes → 开跑前拒绝 */
+    t = await run(basePlan({ snapshotHashMaxBytes: 1024 }))
+    check('snapshotHashMaxBytes 低于下限 → 拒绝', /GATE FAIL/.test(t) && /snapshotHashMaxBytes 非法/.test(t), t.slice(0, 160))
+    t = await run(basePlan({ snapshotHashMaxBytes: 70 * 1024 * 1024 }))
+    check('snapshotHashMaxBytes 超硬上限 → 拒绝', /GATE FAIL/.test(t) && /snapshotHashMaxBytes 非法/.test(t), t.slice(0, 160))
+
+    /* ④ 内容级证据：验证方 2 的摘录对不上 → FAIL */
+    const badQuotePlan = basePlan({
+      verifiers: [
+        { name: '验证方1', session: 's-v1', receipt: R('v1'), citations: [doc('a.md'), doc('b.md')], steps: [receiptCmd(R('v1'), 'verify')] },
+        {
+          name: '验证方2',
+          session: 's-v2',
+          receipt: R('v2'),
+          citations: [doc('a.md'), doc('c.md')],
+          steps: [receiptCmd(R('v2'), 'verify', 'pass', '-', ['ok'], 'bad-quote')],
+        },
+      ],
+    })
+    t = await run(badQuotePlan)
+    g = latestGate()
+    check(
+      '内容级证据：摘录对不上 → GATE FAIL',
+      /GATE FAIL/.test(t) && /内容级证据不合格/.test(t) && g && g.evidenceQuotes && g.evidenceQuotes.violations === 1,
+      g ? JSON.stringify(g.evidenceQuotes) : 'no gate',
+    )
+
+    /* ⑤ 内容级证据可关：requireEvidenceQuote=false 时无摘录仍 PASS */
+    t = await run({ ...badQuotePlan, requireEvidenceQuote: false })
+    g = latestGate()
+    check(
+      'requireEvidenceQuote=false → 无摘录仍 GATE PASS（gate 记账 required=false）',
+      /GATE PASS/.test(t) && g && g.status === 'done' && g.evidenceQuotes && g.evidenceQuotes.required === false,
+      g ? JSON.stringify({ status: g.status, q: g.evidenceQuotes }) : 'no gate',
+    )
+
+    /* ⑥ attacks 结构：只写 target、缺 failure_mode → 形状不合格 */
+    const weakPlan = basePlan()
+    weakPlan.adversarial = { ...weakPlan.adversarial, steps: [receiptCmd(R('adv'), 'adversarial', 'pass', '-', ['ok'], 'weak')] }
+    t = await run(weakPlan)
+    check('attacks 缺 failure_mode → 判攻击面不合格', /GATE FAIL/.test(t) && /攻击面不合格/.test(t), t.slice(0, 240))
+
+    /* ⑦ 只读违规自动还原：对抗性复核改监视区已有文件 → 跑完内容回滚到监视前 */
+    const origA = readFileSync(doc('a.md'), 'utf8')
+    const mkRestore = makeSubagents({})
+    const restorePlan = spawnPlan({
+      adversarial: {
+        ...spawnPlan().adversarial,
+        steps: [isWin ? 'echo hacked> docs\\a.md' : 'echo hacked > docs/a.md'],
+      },
+    })
+    ctx.provide('subagents', mkRestore.sub)
+    t = await run(restorePlan, { sessionId: 's-main', agent: { fake: true } })
+    g = latestGate()
+    check(
+      '只读违规自动还原：被改文件回写原内容（gate.adversarial.restore 记账）',
+      /GATE FAIL/.test(t) &&
+        g &&
+        g.adversarial &&
+        g.adversarial.readOnly === false &&
+        g.adversarial.restore &&
+        g.adversarial.restore.restored.length >= 1 &&
+        readFileSync(doc('a.md'), 'utf8') === origA &&
+        g.warnings.some((w) => /已按监视前快照还原/.test(w)),
+      g ? JSON.stringify({ readOnly: g.adversarial && g.adversarial.readOnly, restore: g.adversarial && g.adversarial.restore }) : 'no gate',
+    )
+  }
 
   section('清理')
   check('临时目录已就绪（无残留 helper 冲突）', existsSync(HELPER))

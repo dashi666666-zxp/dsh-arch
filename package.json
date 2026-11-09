@@ -1,8 +1,8 @@
 {
   "name": "dsh-arch",
-  "version": "0.6.2",
+  "version": "0.9.0",
   "private": true,
-  "description": "架构插件（终端执行架构）：arch_run 把任务落成「规划 → 执行（系统终端）→ 校验 → 回执」四层流水线；arch_flow 把「多角色 + 终端执行 + 子对话强隔离」落成固定阵型（拆分 → 路径 → 对抗性复核（只读）→ 规划 → 隔离 → 修改 → 工作 → 多方验证）——默认 sessionPolicy=spawn 由插件用 subagents.startActivation 现创建真实子会话，角色顺序/子会话隔离/回执/只读/引用文档去重等硬约束全部由代码强制（fail-closed）。v0.6.2：arch_flow 可点名终端执行路线（terminalMode: auto/pty/process；此前 plan 里没有该字段，只能吃引擎默认），gate 记点名值与每角色实际落定路线；pty-smoke 夹具改用 fd 重定向读 helper 输出（沙箱禁管道时不再假失败）；FLOW_VERSION 与插件版本对齐。v0.6.1：修复可见终端窗口的 launcher 编码/路径坑（launcher 首行 chcp 65001、不在 cmd 里 cd，工作目录交给 node 启动器，带空格/中文的路径可用）。v0.6.0：终端执行路线默认走宿主 ctx.terminals（dsh-terminal-bash 持久终端 PTY）——每个任务/每个角色在自己的终端会话里跑（独立会话 ID 与 PID、输出回读落日志、结束标记回传退出码），拿不到服务时如实记 fallback 回退原生子进程（terminal: pty/process/auto 可强制）。v0.5.1：console:true 让每个任务的系统终端开成可见的 Windows Terminal 窗口（辅助脚本回传真实 pid/退出码，窗口保留 keepOpenMs 后可查；缺 wt.exe 即 FAIL，不静默退回隐藏模式）。v0.5.0：①每个角色的任务由插件在它自己的系统终端里跑（独立 PID/日志写进 gate）；②按预演关键词从 DSH 活体技能库给每个角色下发技能（省 token 类默认常驻）；③防幻觉/防对话污染/防越权（自包含 brief、子会话写入快照审计、禁止再派生、evidence 必须真实存在）。",
+  "description": "v0.9.0：三处补盲——①大文件进快照（snapshotHashMaxBytes 默认 4MB，超限用首尾 256KB 采样哈希 + size，不再 hash:null）；②只读违规可还原（监视前保留 ≤256KB 文件原文，改动/删除按原文回写、新增只登记；gate.adversarial.restore 记账）；③内容级证据（验证方回执 quotes 逐字摘录 ≥12 字符，插件真读被引文档核对；requireEvidenceQuote 默认开；attacks 每条必须 target+failure_mode）。另 resolveShell/killTree 平台参数化并补 POSIX 分支单测。架构插件（终端执行架构）：arch_run 把任务落成「规划 → 执行（系统终端）→ 校验 → 回执」四层流水线；arch_flow 把「多角色 + 终端执行 + 子对话强隔离」落成固定阵型（拆分 → 路径 → 对抗性复核（只读）→ 规划 → 隔离 → 修改 → 工作 → 多方验证）——默认 sessionPolicy=spawn 由插件用 subagents.startActivation 现创建真实子会话，角色顺序/子会话隔离/回执/只读/引用文档去重等硬约束全部由代码强制（fail-closed）。v0.8.0：三处收口——①验证权重封顶（每个验证方总权重 ≤1，多引无关文件不再涨权；独立证据要求 ≥2 份「只被一方引用」的文档）；②监视快照上限可配（snapshotMaxFiles 默认 2000，截断必写 gate.snapshot + warning，旧版静默截断）；③断点续跑（每阶段落 state.json，resumeFlowId 续跑：已完成阶段跳过、失败阶段重跑、旧记录标 superseded；断点不存在/坏 JSON/已 PASS/mainSession 不符一律拒绝）；README 写明「GATE PASS 只证流程合规、不证结论正确」的边界。v0.7.0：把阵型里真正独立的两处改为有界并发——验证方之间、对抗性复核向下分发的下级之间，按新参数 maxParallel（默认 3，可 1–6；1＝逐个跑即旧行为）并发；其余阶段仍串行（工作六阶段是因果链，只读复核必须独占跑）。gate 新增 parallel（上限 + 两处实际并发数），stages 按创建顺序（seq）定序，不随完成早晚漂移。v0.6.2：arch_flow 可点名终端执行路线（terminalMode: auto/pty/process；此前 plan 里没有该字段，只能吃引擎默认），gate 记点名值与每角色实际落定路线；pty-smoke 夹具改用 fd 重定向读 helper 输出（沙箱禁管道时不再假失败）；FLOW_VERSION 与插件版本对齐。v0.6.1：修复可见终端窗口的 launcher 编码/路径坑（launcher 首行 chcp 65001、不在 cmd 里 cd，工作目录交给 node 启动器，带空格/中文的路径可用）。v0.6.0：终端执行路线默认走宿主 ctx.terminals（dsh-terminal-bash 持久终端 PTY）——每个任务/每个角色在自己的终端会话里跑（独立会话 ID 与 PID、输出回读落日志、结束标记回传退出码），拿不到服务时如实记 fallback 回退原生子进程（terminal: pty/process/auto 可强制）。v0.5.1：console:true 让每个任务的系统终端开成可见的 Windows Terminal 窗口（辅助脚本回传真实 pid/退出码，窗口保留 keepOpenMs 后可查；缺 wt.exe 即 FAIL，不静默退回隐藏模式）。v0.5.0：①每个角色的任务由插件在它自己的系统终端里跑（独立 PID/日志写进 gate）；②按预演关键词从 DSH 活体技能库给每个角色下发技能（省 token 类默认常驻）；③防幻觉/防对话污染/防越权（自包含 brief、子会话写入快照审计、禁止再派生、evidence 必须真实存在）。",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
@@ -25,5 +25,25 @@
   },
   "engines": {
     "node": ">=20"
-  }
+  },
+  "license": "MIT",
+  "author": "dashi666666-zxp",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dashi666666-zxp/dsh-arch.git"
+  },
+  "homepage": "https://github.com/dashi666666-zxp/dsh-arch#readme",
+  "bugs": {
+    "url": "https://github.com/dashi666666-zxp/dsh-arch/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "architecture",
+    "multi-agent",
+    "terminal",
+    "orchestration",
+    "workflow"
+  ]
 }

@@ -85,6 +85,35 @@ async function main() {
   check('inject 含 tools', Array.isArray(mod.inject) && mod.inject.includes('tools'))
   check('有 apply / VERSION', typeof mod.apply === 'function' && typeof mod.VERSION === 'string')
 
+  section('跨平台分支（v0.9.0：平台参数化，POSIX 分支可单测）')
+  {
+    const { resolveShell, killTree } = mod.__internals
+    const winAuto = resolveShell('auto', 'win32')
+    check('win32/auto → powershell.exe', winAuto.kind === 'powershell' && /powershell\.exe$/i.test(winAuto.exe), JSON.stringify(winAuto))
+    const winCmd = resolveShell('cmd', 'win32')
+    check('win32/cmd → cmd.exe /d /s /c', winCmd.kind === 'cmd' && winCmd.args.includes('/d') && winCmd.args.includes('/c'), JSON.stringify(winCmd))
+    const linBash = resolveShell('bash', 'linux')
+    check('linux/bash → bash -lc（不再落 win32 分支）', linBash.exe === 'bash' && linBash.args.join(' ') === '-lc', JSON.stringify(linBash))
+    const linAuto = resolveShell('auto', 'linux')
+    check('linux/auto → sh -lc', linAuto.kind === 'sh' && linAuto.exe === 'sh', JSON.stringify(linAuto))
+    const objSpec = resolveShell({ exe: '/bin/zsh', args: ['-c'], kind: 'zsh' }, 'linux')
+    check('显式 {exe,args} 规格原样透传', objSpec.exe === '/bin/zsh' && objSpec.args.join(' ') === '-c', JSON.stringify(objSpec))
+    let killedNull = false
+    try {
+      killTree(null, 'linux')
+    } catch {
+      killedNull = true
+    }
+    check('killTree(null) 不抛（平台参数被接受）', killedNull === false)
+    let killedExited = false
+    try {
+      killTree({ exitCode: 0, signalCode: null, pid: 1, kill() {} }, 'linux')
+    } catch {
+      killedExited = true
+    }
+    check('killTree 对已退出进程直接返回', killedExited === false)
+  }
+
   section('装载：工具与服务')
   const { ctx, tools, services } = makeCtx()
   mod.apply(ctx, { home: HOME, shell: isWin ? 'powershell' : 'sh', timeoutMs: 60000 })
