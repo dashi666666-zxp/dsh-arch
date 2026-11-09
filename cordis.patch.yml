@@ -1,0 +1,19 @@
+# dsh-arch bundle patch：把「架构插件（终端执行架构）」挂进 host 组合。
+#
+# 这是 HOST-PLANE 插件：只用 ctx.tools 注册 arch_* 工具、用 ctx.provide 暴露 ctx.arch 服务；
+# 执行走子进程（系统终端），不依赖 webServer / subagents / client runtime。
+# 因此落在 host 组合（本 insert），不要塞进 agent preset。
+#
+# 可选配置（写在 insert 项里）：
+#   config:
+#     enabled: true            # false=只注册工具、执行一律拒绝
+#     home: ""                 # 回执根目录；默认 $DSH_HOME/arch 或 ~/.dsh/arch
+#     shell: auto              # auto / powershell / pwsh / cmd / bash / sh，或 { exe, args }
+#     cwd: ""                  # 默认工作目录（默认=DSH 进程 cwd）
+#     timeoutMs: 120000        # 单步默认超时
+#     maxOutputBytes: 262144   # 单步日志文件写入上限（超出仍计数、不再写盘）
+#     keepRuns: 50             # 磁盘上保留的最近运行数
+
+- insert:
+    - id: dsh-arch
+      name: dsh-arch

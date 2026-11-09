@@ -1,0 +1,29 @@
+{
+  "name": "dsh-arch",
+  "version": "0.6.2",
+  "private": true,
+  "description": "架构插件（终端执行架构）：arch_run 把任务落成「规划 → 执行（系统终端）→ 校验 → 回执」四层流水线；arch_flow 把「多角色 + 终端执行 + 子对话强隔离」落成固定阵型（拆分 → 路径 → 对抗性复核（只读）→ 规划 → 隔离 → 修改 → 工作 → 多方验证）——默认 sessionPolicy=spawn 由插件用 subagents.startActivation 现创建真实子会话，角色顺序/子会话隔离/回执/只读/引用文档去重等硬约束全部由代码强制（fail-closed）。v0.6.2：arch_flow 可点名终端执行路线（terminalMode: auto/pty/process；此前 plan 里没有该字段，只能吃引擎默认），gate 记点名值与每角色实际落定路线；pty-smoke 夹具改用 fd 重定向读 helper 输出（沙箱禁管道时不再假失败）；FLOW_VERSION 与插件版本对齐。v0.6.1：修复可见终端窗口的 launcher 编码/路径坑（launcher 首行 chcp 65001、不在 cmd 里 cd，工作目录交给 node 启动器，带空格/中文的路径可用）。v0.6.0：终端执行路线默认走宿主 ctx.terminals（dsh-terminal-bash 持久终端 PTY）——每个任务/每个角色在自己的终端会话里跑（独立会话 ID 与 PID、输出回读落日志、结束标记回传退出码），拿不到服务时如实记 fallback 回退原生子进程（terminal: pty/process/auto 可强制）。v0.5.1：console:true 让每个任务的系统终端开成可见的 Windows Terminal 窗口（辅助脚本回传真实 pid/退出码，窗口保留 keepOpenMs 后可查；缺 wt.exe 即 FAIL，不静默退回隐藏模式）。v0.5.0：①每个角色的任务由插件在它自己的系统终端里跑（独立 PID/日志写进 gate）；②按预演关键词从 DSH 活体技能库给每个角色下发技能（省 token 类默认常驻）；③防幻觉/防对话污染/防越权（自包含 brief、子会话写入快照审计、禁止再派生、evidence 必须真实存在）。",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "node tests/host-smoke.mjs && node tests/pty-smoke.mjs && node tests/flow-smoke.mjs && node tests/console-smoke.mjs"
+  },
+  "files": [
+    "lib",
+    "tests",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

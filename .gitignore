@@ -1,0 +1,6 @@
+node_modules/
+evidence/
+.dsh-arch-receipts/
+*.log
+.DS_Store
+Thumbs.db
